@@ -6,21 +6,27 @@ const tenant = { organizationId: { ...ref('Organization'), index: true } };
 const options = { timestamps: true, versionKey: false };
 const model = (name, schema) => mongoose.models[name] || mongoose.model(name, schema);
 
-export const Organization = model('Organization', new Schema({ name: { type: String, required: true }, sundayPaid: { type: Boolean, default: true } }, options));
+export const Organization = model('Organization', new Schema({
+  name: { type: String, required: true }, sundayPaid: { type: Boolean, default: true },
+  employeeCodeCounter: { type: Number, default: 0 }, companyName: { type: String, default: 'Appnix Technologies' },
+  address: { type: String, default: '' }, phone: { type: String, default: '' }, email: { type: String, default: '' },
+  website: { type: String, default: 'appnix.info' }, gstin: { type: String, default: '' }, logoUrl: { type: String, default: '' }
+}, options));
 const userSchema = new Schema({
   ...tenant, name: { type: String, required: true },
   login: { type: String, required: true, lowercase: true, trim: true, unique: true },
   passwordHash: { type: String, required: true, select: false },
   role: { type: String, enum: ['admin', 'partner', 'employee'], required: true },
-  employeeId: ref('Employee', false)
+  employeeId: ref('Employee', false), loginDisabled: { type: Boolean, default: false }, tokenVersion: { type: Number, default: 0 }
 }, options);
 userSchema.index({ organizationId: 1, employeeId: 1 }, { unique: true, partialFilterExpression: { employeeId: { $type: 'objectId' } } });
 export const User = model('User', userSchema);
 export const Employee = model('Employee', new Schema({
   ...tenant, name: { type: String, required: true }, phone: { type: String, default: '' },
   monthlySalary: { type: Number, required: true, min: 0 }, perDayRate: { type: Number, required: true, min: 0 },
-  joiningDate: { type: String, required: true }, active: { type: Boolean, default: true }
+  joiningDate: { type: String, required: true }, active: { type: Boolean, default: true }, employeeCode: { type: String, trim: true }
 }, options));
+Employee.schema.index({ organizationId: 1, employeeCode: 1 }, { unique: true, partialFilterExpression: { employeeCode: { $type: 'string' } } });
 const attendanceSchema = new Schema({
   ...tenant, employeeId: ref('Employee'), date: { type: String, required: true },
   status: { type: String, enum: ['present', 'absent', 'half', 'leave', 'weekly_off'], required: true },
@@ -34,12 +40,13 @@ export const Advance = model('Advance', new Schema({
   date: { type: String, required: true }, note: { type: String, default: '' }
 }, options));
 const salarySnapshotSchema = new Schema({
-  employeeName: { type: String, required: true }, employeePhone: { type: String, default: '' },
+  employeeCode: String, employeeName: { type: String, required: true }, phone: String, employeePhone: { type: String, default: '' }, joiningDate: String, monthlySalary: Number,
   perDayRate: { type: Number, required: true }, presentDays: { type: Number, required: true },
   halfDays: { type: Number, required: true }, leaveDays: { type: Number, required: true }, absentDays: { type: Number, required: true },
   sundayPaidDays: { type: Number, required: true }, rebateDays: { type: Number, required: true },
   rebateAmount: { type: Number, required: true }, advances: { type: Number, required: true },
-  grossSalary: { type: Number, required: true }, netSalary: { type: Number, required: true }
+  grossSalary: { type: Number, required: true }, netSalary: { type: Number, required: true },
+  daysInMonth: Number, unpaidDays: Number, unpaidDeduction: Number, totalDeductions: Number
 }, { _id: false });
 const salaryPaymentSchema = new Schema({
   ...tenant, employeeId: ref('Employee'), month: { type: String, required: true },

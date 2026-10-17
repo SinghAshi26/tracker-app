@@ -10,7 +10,8 @@
     "seed": "node --env-file=.env scripts/seed.js",
     "test": "node --test tests/*.test.js",
     "test:integration": "node --test tests/integration/*.test.js",
-    "migrate:payroll": "node --env-file=.env scripts/migrate-payroll.js"
+    "migrate:payroll": "node --env-file=.env scripts/migrate-payroll.js",
+    "migrate:employee-codes": "node --env-file=.env scripts/migrate-employee-codes.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",

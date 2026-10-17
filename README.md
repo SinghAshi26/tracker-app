@@ -20,6 +20,13 @@ SEED_ORG_NAME=Appnix
 SEED_ADMIN_NAME=Administrator
 SEED_ADMIN_LOGIN=admin@example.com
 SEED_ADMIN_PASSWORD=your-strong-initial-password
+COMPANY_NAME=Appnix Technologies
+COMPANY_ADDRESS=
+COMPANY_PHONE=
+COMPANY_EMAIL=
+COMPANY_WEBSITE=appnix.info
+COMPANY_GSTIN=
+COMPANY_LOGO_URL=
 ```
 
 Generate a JWT secret locally:
@@ -43,8 +50,10 @@ Next.js loads `.env` automatically. `npm run seed` explicitly reads `.env`; use 
 
 ## First-use workflow
 
-1. Add employees from **Employees**, including monthly salary and joining date. Changing monthly salary suggests a per-day rate using `SALARY_DAY_DIVISOR` in `lib/payroll-settings.js` (default **30**, rounded to two decimals). You can override the rate; the override remains until monthly salary changes again. Opening an existing employee preserves their saved rate.
+1. Add employees from **Employees**, including monthly salary and joining date. Each organization assigns employee codes in creation order (`APX-0001`, `APX-0002`, ...). Changing monthly salary suggests a per-day rate using `SALARY_DAY_DIVISOR` in `lib/payroll-settings.js` (default **30**, rounded to two decimals). You can override the rate; the override remains until monthly salary changes again. Opening an existing employee preserves their saved rate.
 2. Use **Create login** on an employee card to set their email/phone and initial password. Share those credentials and the organization ID securely.
+Admins can use **Update login** on employee or partner cards to change a Login ID or set a new password; existing passwords are never shown.
+Admins can disable or re-enable a login from the same form; disabling blocks sign-in and invalidates active sessions without changing history.
 3. Use **Add partner** to create an expense participant. Admins and partners can participate in splits; employee accounts cannot.
 4. Pick a date in **Attendance**, tap P / A / H / L, or mark all present, then **Save attendance**.
 5. Review **Salary & advances**, issue advances, and download the selected month's CSV.
@@ -86,7 +95,21 @@ Sundays are weekly off and paid by default. The admin's **Paid Sundays** checkbo
 
 Each employee/date still has at most one attendance record. Advances are selected by payment date within the month. Estimates use integer paise, round the final earned amount to two decimals, allow negative net salary, and include the full selected month's eligible Sundays (including remaining Sundays in the current month). Current rates and attendance affect estimates. Overtime, statutory deductions, and historical rate schedules are not included.
 
-Admin **Mark as credited** requires confirmation and freezes the rate, day counts, rebates, advances, gross/net salary, employee name/phone, credited date, and crediting admin. Concurrent/repeated credit requests cannot replace a credited snapshot. **Undo** returns the month to Pending and withdraws the slip; re-credit uses the latest calculation. SalaryPayment has a unique organization/employee/month index. The PDF always reads the frozen snapshot, even after attendance, salary, or organization settings change.
+Admin **Mark as credited** requires confirmation and freezes the rate, day counts, rebates, advances, gross/net salary, employee code/name/phone/joining date/monthly salary, and crediting admin. Concurrent/repeated credit requests cannot replace a credited snapshot. **Undo** returns the month to Pending and withdraws the slip; re-credit uses the latest calculation. SalaryPayment has a unique organization/employee/month index. The A4 PDF always reads frozen payment amounts, even after attendance, salary, or organization settings change. It includes the employee ID, attendance and salary tables, salary in Indian words, company details, and a logo when a supported HTTPS PNG/JPEG URL is configured. Amounts use the embedded Noto font's Rupee glyph when available and otherwise use `Rs.`.
+
+Company details are stored on each `Organization` (`companyName`, `address`, `phone`, `email`, `website`, `gstin`, and `logoUrl`). Seed-time `COMPANY_*` values fill only blank fields; `COMPANY_ADDRESS`, `COMPANY_PHONE`, and `COMPANY_EMAIL` are also PDF fallbacks when their organization values are empty. Existing organizations can be configured with an admin-only `PATCH /api/organization/settings` body such as:
+
+```json
+{"companyName":"Appnix Technologies","address":"Your business address","phone":"+91 98765 43210","email":"accounts@example.com","website":"appnix.info","gstin":"","logoUrl":"https://example.com/logo.png"}
+```
+
+To backfill existing employees with codes in `createdAt` order, use:
+
+```powershell
+npm run migrate:employee-codes -- --organization-id=YOUR_ORGANIZATION_ID
+```
+
+The seed also performs this backfill. The employee list lazily assigns missing codes, so older records remain usable without a manual migration. A unique organization/code index and atomic organization counter protect concurrent employee creation.
 
 Employees can navigate from their joining month through the current month, see rebate dates/notes and totals, and download a Salary Slip only for credited months. Pending months show **Salary slip not available yet**. `GET /api/salary-slip?month=YYYY-MM&employeeId=...` permits only the owning employee or an admin in the same organization; partners are denied. Payment writes (`POST /api/salary-payments`) and settings (`PATCH /api/organization/settings`) are admin-only, validated with Zod, and checked in both middleware and the route. Slips use a small server-side PDF writer and a bundled OFL-licensed Noto Latin font, without native executables, added dependencies, or runtime downloads. Currency is labeled INR; characters outside the bundled font are explicitly represented by their Unicode code rather than omitted.
 
@@ -128,6 +151,9 @@ Positive balance means money to receive; negative means money owed. Balances use
 | `/api/attendance?date=YYYY-MM-DD` or `?month=YYYY-MM` | GET, PUT | Read attendance / save a batch |
 | `/api/advances?month=YYYY-MM` | GET, POST | Monthly advances / add advance |
 | `/api/salary?month=YYYY-MM[&format=csv]` | GET | Salary with attendance/advance breakdown |
+| `/api/organization/settings` | PATCH | Admin-only company slip details and Sunday-pay setting |
+| `/api/salary-payments` | POST | Admin credit / undo for a monthly salary |
+| `/api/salary-slip?month=YYYY-MM&employeeId=ID` | GET | Download a credited PDF salary slip |
 | `/api/expenses?month=YYYY-MM[&category=Meals&paidBy=ID]` | GET, POST | Filtered expense ledger / add expense |
 | `/api/balances` | GET | All-time balances and suggested payments |
 | `/api/settlements` | GET, POST | Settlement ledger / record repayment |
@@ -191,6 +217,7 @@ components/
 lib/
   api.js                # Tenant-scoped authentication and route wrapper
   calculations.js       # Salary, integer-money splits, balances, CSV
+  employee-code.js      # Per-organization employee code allocation and backfill
   client.js             # Browser API and presentation helpers
   finance.js            # Organization ledger aggregation
   mongodb.js            # Global cached serverless connection
@@ -200,7 +227,7 @@ lib/
   validation.js         # Zod schemas and calendar validation
 models/index.js         # Mongoose schemas and indexes
 public/                 # Manifest, service worker, offline page, icons
-scripts/                # Organization/admin seed and icon renderer
+scripts/                # Organization/admin seed, employee-code migration, and icon renderer
 tests/                  # Unit and isolated MongoDB integration suites
 middleware.js           # Edge-compatible role and JWT gate
 ```

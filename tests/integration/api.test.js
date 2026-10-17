@@ -15,6 +15,7 @@ import * as salary from '../../app/api/salary/route.js';
 import * as expenses from '../../app/api/expenses/route.js';
 import * as employees from '../../app/api/employees/route.js';
 import * as users from '../../app/api/users/route.js';
+import * as userLogin from '../../app/api/users/[id]/login/route.js';
 import * as balances from '../../app/api/balances/route.js';
 import * as settlements from '../../app/api/settlements/route.js';
 import * as salaryPayments from '../../app/api/salary-payments/route.js';
@@ -183,6 +184,7 @@ test('migration is idempotent and preserves explicit settings, rebates and other
   assert.equal((await Organization.findOne({ _id: orgA._id }).lean()).sundayPaid, false);
   assert.equal((await Attendance.findOne({ organizationId: orgA._id, employeeId: employeeA._id, date: '2026-10-01' }).lean()).rebate, true);
 });
+
 test('employee history rejects pre-joining months and future months at the API', async () => {
   assert.equal((await salary.GET(request('/api/salary?month=2025-12', employeeUser))).status, 400);
   assert.equal((await salary.GET(request('/api/salary?month=9999-12', employeeUser))).status, 400);
@@ -191,4 +193,35 @@ test('deactivated employees lose access even with an existing valid JWT', async 
   await Employee.updateOne({ _id: employeeA._id, organizationId: orgA._id }, { $set: { active: false } });
   const response = await salary.GET(request('/api/salary?month=2026-10', employeeUser));
   assert.equal(response.status, 401); assert.match(response.headers.get('set-cookie'), /Max-Age=0/i);
+});
+
+test('admin can update, disable, and re-enable employee and partner logins safely', async () => {
+  const path = `/api/users/${partner._id}/login`;
+  const updated = await userLogin.PATCH(request(path, admin, 'PATCH', { loginId: 'partner-new@example.com' }));
+  assert.equal(updated.status, 200);
+  const safeUser = (await updated.json()).user;
+  assert.equal(safeUser.login, 'partner-new@example.com');
+  assert.equal(safeUser.loginDisabled, false);
+  assert.equal('passwordHash' in safeUser, false);
+
+  const duplicate = await userLogin.PATCH(request(path, admin, 'PATCH', { loginId: employeeUser.login }));
+  assert.equal(duplicate.status, 409);
+  assert.match((await duplicate.json()).error, /already used/i);
+
+  for (const user of [partner, employeeUser]) {
+    assert.equal((await userLogin.PATCH(request(path, user, 'PATCH', { disabled: true }))).status, 403);
+    assert.equal((await middleware(request(path, user, 'PATCH', { disabled: true }))).status, 403);
+  }
+
+  assert.equal((await userLogin.PATCH(request(path, admin, 'PATCH', { disabled: true }))).status, 200);
+  assert.equal((await login.POST(request('/api/auth/login', null, 'POST', { organizationId: String(orgA._id), login: 'partner-new@example.com', password: 'testing-password-123' }))).status, 403);
+  assert.equal((await balances.GET(request('/api/balances', partner))).status, 401);
+  assert.equal((await userLogin.PATCH(request(path, admin, 'PATCH', { disabled: false }))).status, 200);
+  const reenabled = await login.POST(request('/api/auth/login', null, 'POST', { organizationId: String(orgA._id), login: 'partner-new@example.com', password: 'testing-password-123' }));
+  assert.equal(reenabled.status, 200);
+
+  assert.equal((await userLogin.PATCH(request(path, admin, 'PATCH', { password: 'new-testing-password-123', confirmPassword: 'new-testing-password-123', loginId: 'partner-new@example.com' }))).status, 200);
+  assert.equal((await balances.GET(request('/api/balances', partner))).status, 401);
+  assert.equal((await login.POST(request('/api/auth/login', null, 'POST', { organizationId: String(orgA._id), login: 'partner-new@example.com', password: 'testing-password-123' }))).status, 401);
+  assert.equal((await login.POST(request('/api/auth/login', null, 'POST', { organizationId: String(orgA._id), login: 'partner-new@example.com', password: 'new-testing-password-123' }))).status, 200);
 });

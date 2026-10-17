@@ -22,6 +22,7 @@ export const POST = endpoint(null, async request => {
   const user = await User.findOne({ organizationId: input.organizationId, login: input.login }).select('+passwordHash');
   const valid = await bcrypt.compare(input.password, user?.passwordHash || dummyHash);
   if (!user || !valid) throw new APIError(401, 'Invalid organization, login, or password');
+  if (user.loginDisabled === true) throw new APIError(403, 'This login is disabled. Contact your administrator.');
   if (user.role === 'employee' && !await Employee.exists({ _id: user.employeeId, organizationId: user.organizationId, active: true })) throw new APIError(403, 'Employee account is inactive');
   await LoginAttempt.deleteOne(scope);
   const response = json({ role: user.role });

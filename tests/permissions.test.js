@@ -34,3 +34,10 @@ test('salary credit/settings writes are admin-only, slips are never available to
     assert.equal(canAccessAPI('/api/organization/settings', 'PATCH', role), role === 'admin');
   }
 });
+test('login update endpoint is admin-only for concrete user IDs', () => {
+  const path = '/api/users/0123456789abcdef01234567/login';
+  assert.equal(canAccessAPI(path, 'PATCH', 'admin'), true);
+  assert.equal(canAccessAPI(path, 'PATCH', 'partner'), false);
+  assert.equal(canAccessAPI(path, 'PATCH', 'employee'), false);
+  assert.equal(canAccessAPI(path, 'GET', 'admin'), false);
+});
