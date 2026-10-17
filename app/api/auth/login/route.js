@@ -1,0 +1,30 @@
+import { z } from 'zod';
+import bcrypt from 'bcryptjs';
+import { createHash } from 'node:crypto';
+import { endpoint, body, json, APIError } from '../../../../lib/api.js';
+import { id, login } from '../../../../lib/validation.js';
+import connectDB from '../../../../lib/mongodb.js';
+import { User, Employee, LoginAttempt } from '../../../../models/index.js';
+import { signToken, COOKIE_NAME, cookieOptions } from '../../../../lib/token.js';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+const schema = z.object({ organizationId: id, login, password: z.string().min(1).max(72) }).strict();
+// A valid bcrypt hash keeps unknown-account comparisons expensive too.
+const dummyHash = bcrypt.hashSync('appnix-dummy-never-a-real-password', 12);
+export const POST = endpoint(null, async request => {
+  const input = await body(request, schema);
+  await connectDB();
+  const key = createHash('sha256').update(input.login).digest('hex');
+  const scope = { organizationId: input.organizationId, key };
+  await LoginAttempt.deleteOne({ ...scope, expiresAt: { $lte: new Date() } });
+  const attempt = await LoginAttempt.findOneAndUpdate(scope, { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date(Date.now() + 15 * 60 * 1000) } }, { upsert: true, new: true });
+  if (attempt.count > 10) throw new APIError(429, 'Too many sign-in attempts. Try again in 15 minutes.');
+  const user = await User.findOne({ organizationId: input.organizationId, login: input.login }).select('+passwordHash');
+  const valid = await bcrypt.compare(input.password, user?.passwordHash || dummyHash);
+  if (!user || !valid) throw new APIError(401, 'Invalid organization, login, or password');
+  if (user.role === 'employee' && !await Employee.exists({ _id: user.employeeId, organizationId: user.organizationId, active: true })) throw new APIError(403, 'Employee account is inactive');
+  await LoginAttempt.deleteOne(scope);
+  const response = json({ role: user.role });
+  response.cookies.set(COOKIE_NAME, await signToken(user), cookieOptions);
+  return response;
+});
