@@ -6,7 +6,8 @@ export const GET = endpoint(['admin', 'employee'], async (r, u) => {
   const p = new URL(r.url).searchParams;
   const requested = p.get('employeeId'); if (requested) id.parse(requested);
   const filter = { organizationId: u.organizationId, ...employeeFilter(u, requested), date: p.has('date') ? date.parse(p.get('date')) : monthRange(p.get('month')) };
-  return json({ attendance: await Attendance.find(filter).sort({ date: 1 }).lean() });
+  const attendance = await Attendance.find(filter).sort({ date: 1 }).lean();
+  return json({ attendance: attendance.map(row => ({ ...row, rebate: row.rebate ?? false, rebateNote: row.rebateNote || '' })) });
 });
 export const PUT = endpoint(['admin'], async (r, u) => {
   const data = await body(r, attendanceSchema);
@@ -14,7 +15,7 @@ export const PUT = endpoint(['admin'], async (r, u) => {
   if (employees.length !== data.records.length) throw new APIError(400, 'Employees must be active, in your organization, and joined by this date');
   await Attendance.bulkWrite(data.records.map(row => ({ updateOne: {
     filter: { organizationId: u.organizationId, employeeId: row.employeeId, date: data.date },
-    update: { $set: { status: row.status }, $setOnInsert: { organizationId: u.organizationId, employeeId: row.employeeId, date: data.date } }, upsert: true
+    update: { $set: { status: row.status, rebate: row.rebate, rebateNote: row.rebate ? row.rebateNote : '' }, $setOnInsert: { organizationId: u.organizationId, employeeId: row.employeeId, date: data.date } }, upsert: true
   } })));
   return json({ ok: true });
 });

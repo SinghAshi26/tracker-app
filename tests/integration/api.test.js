@@ -5,7 +5,7 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { NextRequest } from 'next/server.js';
-import { Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt } from '../../models/index.js';
+import { Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt, SalaryPayment } from '../../models/index.js';
 import { signToken, COOKIE_NAME } from '../../lib/token.js';
 import { middleware } from '../../middleware.js';
 import * as login from '../../app/api/auth/login/route.js';
@@ -17,6 +17,10 @@ import * as employees from '../../app/api/employees/route.js';
 import * as users from '../../app/api/users/route.js';
 import * as balances from '../../app/api/balances/route.js';
 import * as settlements from '../../app/api/settlements/route.js';
+import * as salaryPayments from '../../app/api/salary-payments/route.js';
+import * as salarySlip from '../../app/api/salary-slip/route.js';
+import * as settings from '../../app/api/organization/settings/route.js';
+import { migratePayrollDefaults } from '../../scripts/migrate-payroll.js';
 import { date, monthRange } from '../../lib/validation.js';
 
 let mongo, orgA, orgB, admin, partner, employeeUser, employeeA, employeeB, adminB;
@@ -25,7 +29,7 @@ before(async () => {
   mongo = await MongoMemoryServer.create();
   process.env.MONGODB_URI = mongo.getUri(); process.env.JWT_SECRET = 'test-only-secret-at-least-32-bytes-long';
   await mongoose.connect(process.env.MONGODB_URI);
-  await Promise.all([Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt].map(m => m.init()));
+  await Promise.all([Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt, SalaryPayment].map(m => m.init()));
   [orgA, orgB] = await Organization.create([{ name: 'A' }, { name: 'B' }]);
   [employeeA, employeeB] = await Employee.create([{ organizationId: orgA._id, name: 'Employee A', phone: '', monthlySalary: 30000, perDayRate: 1000, joiningDate: '2026-01-01' }, { organizationId: orgB._id, name: 'Employee B', phone: '', monthlySalary: 60000, perDayRate: 2000, joiningDate: '2026-01-01' }]);
   const passwordHash = await bcrypt.hash('testing-password-123', 4);
@@ -63,7 +67,7 @@ test('employee is denied expenses both in route and middleware, including crafte
 });
 test('employee salary and advances are own-only and month-scoped', async () => {
   const response = await salary.GET(request('/api/salary?month=2026-10', employeeUser)), data = await response.json();
-  assert.equal(response.status, 200); assert.equal(data.rows.length, 1); assert.equal(data.rows[0].employeeId, String(employeeA._id)); assert.equal(data.rows[0].netSalary, 1300); assert.equal(data.advances.length, 1);
+  assert.equal(response.status, 200); assert.equal(data.rows.length, 1); assert.equal(data.rows[0].employeeId, String(employeeA._id)); assert.equal(data.rows[0].netSalary, 5300); assert.equal(data.advances.length, 1);
   for (const [module, path] of [[salary, '/api/salary'], [attendance, '/api/attendance'], [advances, '/api/advances']]) assert.equal((await module.GET(request(`${path}?month=2026-10&employeeId=${employeeB._id}`, employeeUser))).status, 403);
 });
 test('partner cannot access attendance, salary, advances, or create users', async () => {
@@ -110,6 +114,78 @@ test('mutation rejects cross-origin and missing-origin requests', async () => {
 test('invalid dates and month boundaries are validated', () => {
   assert.equal(date.safeParse('2026-02-30').success, false); assert.equal(date.safeParse('2024-02-29').success, true);
   assert.deepEqual(monthRange('2026-12'), { $gte: '2026-12-01', $lt: '2027-01-01' });
+});
+test('salary slips reject partners, other employees, cross-tenant admins and uncredited months', async () => {
+  const path = `/api/salary-slip?month=2026-10&employeeId=${employeeA._id}`;
+  assert.equal((await salarySlip.GET(request(path, partner))).status, 403);
+  assert.equal((await middleware(request(path, partner))).status, 403);
+  assert.equal((await salarySlip.GET(request(path, admin))).status, 404);
+  assert.equal((await salarySlip.GET(request(path, employeeUser))).status, 404);
+  assert.equal((await salarySlip.GET(request(`/api/salary-slip?month=2026-10&employeeId=${employeeB._id}`, employeeUser))).status, 403);
+  assert.equal((await salarySlip.GET(request(path, adminB))).status, 404);
+  for (const u of [partner, employeeUser]) assert.equal((await salaryPayments.POST(request('/api/salary-payments', u, 'POST', { employeeId: String(employeeA._id), month: '2026-10', action: 'credit' }))).status, 403);
+});
+test('rebate is saved and cleared when changing to a non-rebatable status', async () => {
+  const input = { date: '2026-10-07', records: [{ employeeId: String(employeeA._id), status: 'leave', rebate: true, rebateNote: 'Approved paid leave' }] };
+  assert.equal((await attendance.PUT(request('/api/attendance', admin, 'PUT', input))).status, 200);
+  let data = await (await salary.GET(request('/api/salary?month=2026-10', employeeUser))).json();
+  assert.equal(data.rows[0].rebateDays, 1); assert.equal(data.rows[0].rebateAmount, 1000);
+  input.records[0] = { employeeId: String(employeeA._id), status: 'present' };
+  assert.equal((await attendance.PUT(request('/api/attendance', admin, 'PUT', input))).status, 200);
+  data = await (await attendance.GET(request('/api/attendance?date=2026-10-07', employeeUser))).json();
+  assert.equal(data.attendance[0].rebate, false); assert.equal(data.attendance[0].rebateNote, '');
+});
+test('credit freezes the complete slip and concurrent credit attempts never overwrite it', async () => {
+  const input = { employeeId: String(employeeA._id), month: '2026-10', action: 'credit' };
+  const responses = await Promise.all([salaryPayments.POST(request('/api/salary-payments', admin, 'POST', input)), salaryPayments.POST(request('/api/salary-payments', admin, 'POST', input))]);
+  assert.ok(responses.every(r => r.status === 200));
+  const scope = { organizationId: orgA._id, employeeId: employeeA._id, month: '2026-10' };
+  assert.equal(await SalaryPayment.countDocuments(scope), 1);
+  const before = await SalaryPayment.findOne(scope).lean();
+  const path = `/api/salary-slip?month=2026-10&employeeId=${employeeA._id}`;
+  const first = await salarySlip.GET(request(path, employeeUser));
+  assert.equal(first.status, 200); assert.equal(first.headers.get('content-type'), 'application/pdf');
+  assert.equal(first.headers.get('cache-control'), 'no-store, private');
+  const firstBytes = Buffer.from(await first.arrayBuffer());
+  await Employee.updateOne({ organizationId: orgA._id, _id: employeeA._id }, { $set: { perDayRate: 9999, name: 'Edited after payment' } });
+  await Attendance.updateOne({ organizationId: orgA._id, employeeId: employeeA._id, date: '2026-10-01' }, { $set: { status: 'absent', rebate: true } });
+  await salaryPayments.POST(request('/api/salary-payments', admin, 'POST', input));
+  const after = await SalaryPayment.findOne(scope).lean();
+  assert.deepEqual(after.snapshot, before.snapshot); assert.deepEqual(after.creditedAt, before.creditedAt);
+  const second = await salarySlip.GET(request(path, admin));
+  assert.ok(firstBytes.equals(Buffer.from(await second.arrayBuffer())));
+});
+test('undo is admin-only, removes slip availability, and re-credit uses latest calculation', async () => {
+  const scope = { organizationId: orgA._id, employeeId: employeeA._id, month: '2026-10' };
+  const payment = await SalaryPayment.findOne(scope).lean();
+  const input = { employeeId: String(employeeA._id), month: '2026-10', action: 'undo', creditedAt: payment.creditedAt.toISOString() };
+  assert.equal((await salaryPayments.POST(request('/api/salary-payments', partner, 'POST', input))).status, 403);
+  assert.equal((await salaryPayments.POST(request('/api/salary-payments', admin, 'POST', { ...input, creditedAt: '2020-01-01T00:00:00Z' }))).status, 409);
+  assert.equal((await salaryPayments.POST(request('/api/salary-payments', admin, 'POST', input))).status, 200);
+  assert.equal((await salarySlip.GET(request(`/api/salary-slip?month=2026-10&employeeId=${employeeA._id}`, employeeUser))).status, 404);
+  const credited = await salaryPayments.POST(request('/api/salary-payments', admin, 'POST', { employeeId: String(employeeA._id), month: '2026-10', action: 'credit' }));
+  assert.equal((await credited.json()).payment.snapshot.perDayRate, 9999);
+});
+test('organization setting is admin-only and cannot affect another organization', async () => {
+  assert.equal((await settings.PATCH(request('/api/organization/settings', partner, 'PATCH', { sundayPaid: false }))).status, 403);
+  assert.equal((await settings.PATCH(request('/api/organization/settings', admin, 'PATCH', { sundayPaid: false, organizationId: String(orgB._id) }))).status, 400);
+  assert.equal((await settings.PATCH(request('/api/organization/settings', admin, 'PATCH', { sundayPaid: false }))).status, 200);
+  const row = (await (await salary.GET(request('/api/salary?month=2026-10', employeeUser))).json()).rows[0];
+  assert.equal(row.sundayPaidDays, 0);
+  assert.equal((await Organization.findOne({ _id: orgB._id }).lean()).sundayPaid, true);
+});
+test('migration is idempotent and preserves explicit settings, rebates and other organizations', async () => {
+  const scope = { organizationId: orgA._id, employeeId: employeeA._id, date: '2026-10-02' };
+  await Attendance.collection.updateOne(scope, { $unset: { rebate: '', rebateNote: '' } });
+  await migratePayrollDefaults(orgA._id); await migratePayrollDefaults(orgA._id);
+  const record = await Attendance.findOne(scope).lean();
+  assert.equal(record.rebate, false); assert.equal(record.rebateNote, '');
+  assert.equal((await Organization.findOne({ _id: orgA._id }).lean()).sundayPaid, false);
+  assert.equal((await Attendance.findOne({ organizationId: orgA._id, employeeId: employeeA._id, date: '2026-10-01' }).lean()).rebate, true);
+});
+test('employee history rejects pre-joining months and future months at the API', async () => {
+  assert.equal((await salary.GET(request('/api/salary?month=2025-12', employeeUser))).status, 400);
+  assert.equal((await salary.GET(request('/api/salary?month=9999-12', employeeUser))).status, 400);
 });
 test('deactivated employees lose access even with an existing valid JWT', async () => {
   await Employee.updateOne({ _id: employeeA._id, organizationId: orgA._id }, { $set: { active: false } });

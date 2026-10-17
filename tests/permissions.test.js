@@ -25,3 +25,12 @@ test('unknown routes and methods are denied and page roles match landing routes'
   assert.equal(canAccessPage('/expenses', 'employee'), false);
   assert.equal(canAccessPage('/salary', 'partner'), false);
 });
+test('salary credit/settings writes are admin-only, slips are never available to partners', () => {
+  assert.equal(canAccessAPI('/api/salary-slip', 'GET', 'admin'), true);
+  assert.equal(canAccessAPI('/api/salary-slip', 'GET', 'employee'), true);
+  assert.equal(canAccessAPI('/api/salary-slip', 'GET', 'partner'), false);
+  for (const role of ['admin', 'partner', 'employee']) {
+    assert.equal(canAccessAPI('/api/salary-payments', 'POST', role), role === 'admin');
+    assert.equal(canAccessAPI('/api/organization/settings', 'PATCH', role), role === 'admin');
+  }
+});

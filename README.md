@@ -43,7 +43,7 @@ Next.js loads `.env` automatically. `npm run seed` explicitly reads `.env`; use 
 
 ## First-use workflow
 
-1. Add employees from **Employees**, including their explicit monthly salary, per-day rate, and joining date. A suggested rate might be monthly salary divided by your agreed working-day basis, but the app never assumes a divisor.
+1. Add employees from **Employees**, including monthly salary and joining date. Changing monthly salary suggests a per-day rate using `SALARY_DAY_DIVISOR` in `lib/payroll-settings.js` (default **30**, rounded to two decimals). You can override the rate; the override remains until monthly salary changes again. Opening an existing employee preserves their saved rate.
 2. Use **Create login** on an employee card to set their email/phone and initial password. Share those credentials and the organization ID securely.
 3. Use **Add partner** to create an expense participant. Admins and partners can participate in splits; employee accounts cannot.
 4. Pick a date in **Attendance**, tap P / A / H / L, or mark all present, then **Save attendance**.
@@ -77,14 +77,26 @@ All mutations, including login/logout, require a same-origin `Origin` header. AP
 ## Salary and splits
 
 ```text
-payableDays = presentDays + 0.5 × halfDays
+payableDays = presentDays + 0.5 × halfDays + sundayPaidDays + rebateDays
 earnedSalary = payableDays × perDayRate
 estimatedSalary = earnedSalary − advances dated within the selected month
 ```
 
-Absent, leave, and unmarked days are unpaid. Each employee/date has at most one attendance record. Advances are selected by their payment date, not record creation date. Monthly salary is a reference field; the explicitly configured per-day rate drives calculations. Calculations use integer paise and round fractional paise at the final earned-salary calculation. Negative net salary is shown rather than clamped to zero.
+Sundays are weekly off and paid by default. The admin's **Paid Sundays** checkbox on Salary changes the organization-level `sundayPaid` setting. A Sunday marked Present counts once as a normal worked day; other legacy Sunday statuses remain stored but are treated as weekly off. Weekday Leave/Absent records can receive a **Give rebate** toggle and optional note; each rebate adds one paid day. Rebates never double-count Sundays, Present, or Half days. Dates before joining are disabled and excluded from salary, rebates, Sundays, and advances.
 
-This is an **estimate**, not a locked payroll ledger. Editing a per-day rate changes historical estimates as well. Pay slips, payroll locking, overtime, statutory deductions, and rate history are not part of this implementation.
+Each employee/date still has at most one attendance record. Advances are selected by payment date within the month. Estimates use integer paise, round the final earned amount to two decimals, allow negative net salary, and include the full selected month's eligible Sundays (including remaining Sundays in the current month). Current rates and attendance affect estimates. Overtime, statutory deductions, and historical rate schedules are not included.
+
+Admin **Mark as credited** requires confirmation and freezes the rate, day counts, rebates, advances, gross/net salary, employee name/phone, credited date, and crediting admin. Concurrent/repeated credit requests cannot replace a credited snapshot. **Undo** returns the month to Pending and withdraws the slip; re-credit uses the latest calculation. SalaryPayment has a unique organization/employee/month index. The PDF always reads the frozen snapshot, even after attendance, salary, or organization settings change.
+
+Employees can navigate from their joining month through the current month, see rebate dates/notes and totals, and download a Salary Slip only for credited months. Pending months show **Salary slip not available yet**. `GET /api/salary-slip?month=YYYY-MM&employeeId=...` permits only the owning employee or an admin in the same organization; partners are denied. Payment writes (`POST /api/salary-payments`) and settings (`PATCH /api/organization/settings`) are admin-only, validated with Zod, and checked in both middleware and the route. Slips use a small server-side PDF writer and a bundled OFL-licensed Noto Latin font, without native executables, added dependencies, or runtime downloads. Currency is labeled INR; characters outside the bundled font are explicitly represented by their Unicode code rather than omitted.
+
+Legacy reads safely default missing `Attendance.rebate` to false, `rebateNote` to an empty string, and `Organization.sundayPaid` to true. No destructive migration is required. To persist defaults and create the SalaryPayment index for an existing organization, run the idempotent, tenant-scoped command (or rerun the existing seed):
+
+```powershell
+npm run migrate:payroll -- --organization-id=YOUR_ORGANIZATION_ID
+```
+
+The migration only fills missing fields. Existing attendance, explicit settings (including `sundayPaid: false`), rebates, and employee rates are preserved. Existing records are never credited automatically.
 
 ```text
 expenseBalance = totalPaid − totalShares
@@ -161,7 +173,7 @@ npm run build
 - For environments that prohibit test-runner subprocesses, the dependency-free suites can run directly: `node tests/calculations.test.js` and `node tests/permissions.test.js`.
 - Manual acceptance: test 360px and desktop layouts, all three roles, sign out/sign in as another user, cross-tenant ID rejection, CSV downloads, equal/custom splits, settlement history, and offline/install behavior over HTTPS.
 
-Implementation-environment verification: **10 unit tests passed** and **47 JavaScript/JSX files parsed successfully**. Package installation was blocked by the environment's outbound network configuration, so the Next.js production build, browser QA, and MongoDB integration suite were not executed there. No live database was seeded and no deployment was created.
+Payroll-change verification: **21 unit tests passed**, including full-month Sundays, worked-Sunday and rebate deduplication, pre-joining exclusions, legacy defaults, role permissions, and PDF cross-reference/font/content checks. JavaScript/JSX syntax checks passed. The production build and isolated MongoDB integration suite were attempted but blocked by the environment's `spawn EPERM` restriction. No live payroll data was changed or migrated during implementation.
 
 ## Folder structure
 
