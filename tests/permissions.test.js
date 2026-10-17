@@ -41,3 +41,19 @@ test('login update endpoint is admin-only for concrete user IDs', () => {
   assert.equal(canAccessAPI(path, 'PATCH', 'employee'), false);
   assert.equal(canAccessAPI(path, 'GET', 'admin'), false);
 });
+test('work-hours endpoints and page are restricted to admins and employees as intended', () => {
+  const paths = ['/api/work/check-in', '/api/work/check-out', '/api/work/me'];
+  for (const path of paths) {
+    assert.equal(canAccessAPI(path, path.endsWith('/me') ? 'GET' : 'POST', 'employee'), true);
+    assert.equal(canAccessAPI(path, path.endsWith('/me') ? 'GET' : 'POST', 'admin'), false);
+    assert.equal(canAccessAPI(path, path.endsWith('/me') ? 'GET' : 'POST', 'partner'), false);
+  }
+  for (const [path, method] of [['/api/work/live', 'GET'], ['/api/work/report', 'GET'], ['/api/work/sessions/0123456789abcdef01234567', 'PATCH']]) {
+    assert.equal(canAccessAPI(path, method, 'admin'), true);
+    assert.equal(canAccessAPI(path, method, 'employee'), false);
+    assert.equal(canAccessAPI(path, method, 'partner'), false);
+  }
+  assert.equal(canAccessPage('/work-hours', 'employee'), true);
+  assert.equal(canAccessPage('/work-hours', 'admin'), true);
+  assert.equal(canAccessPage('/work-hours', 'partner'), false);
+});

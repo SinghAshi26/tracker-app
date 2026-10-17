@@ -19,4 +19,4 @@ export async function middleware(request) {
   response.headers.set('Cache-Control', 'no-store, private');
   return response;
 }
-export const config = { matcher: ['/', '/login', '/dashboard/:path*', '/employees/:path*', '/attendance/:path*', '/salary/:path*', '/expenses/:path*', '/me/:path*', '/api/:path*'] };
+export const config = { matcher: ['/', '/login', '/dashboard/:path*', '/employees/:path*', '/attendance/:path*', '/salary/:path*', '/expenses/:path*', '/me/:path*', '/work-hours/:path*', '/api/:path*'] };

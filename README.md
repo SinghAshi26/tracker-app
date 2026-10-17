@@ -113,6 +113,10 @@ The seed also performs this backfill. The employee list lazily assigns missing c
 
 Employees can navigate from their joining month through the current month, see rebate dates/notes and totals, and download a Salary Slip only for credited months. Pending months show **Salary slip not available yet**. `GET /api/salary-slip?month=YYYY-MM&employeeId=...` permits only the owning employee or an admin in the same organization; partners are denied. Payment writes (`POST /api/salary-payments`) and settings (`PATCH /api/organization/settings`) are admin-only, validated with Zod, and checked in both middleware and the route. Slips use a small server-side PDF writer and a bundled OFL-licensed Noto Latin font, without native executables, added dependencies, or runtime downloads. Currency is labeled INR; characters outside the bundled font are explicitly represented by their Unicode code rather than omitted.
 
+## Employee check-in and check-out
+
+Employees use **Work hours** to check in and out; these sessions are separate from attendance and never affect salary. `MAX_SESSION_HOURS` in `lib/work-hours.js` defaults to 14; stale open sessions are closed lazily at the limit, and admins can correct a session from **Work hours** with an edit note. Admins can review live status, monthly totals, and export a work-hours CSV.
+
 Legacy reads safely default missing `Attendance.rebate` to false, `rebateNote` to an empty string, and `Organization.sundayPaid` to true. No destructive migration is required. To persist defaults and create the SalaryPayment index for an existing organization, run the idempotent, tenant-scoped command (or rerun the existing seed):
 
 ```powershell
@@ -154,6 +158,8 @@ Positive balance means money to receive; negative means money owed. Balances use
 | `/api/organization/settings` | PATCH | Admin-only company slip details and Sunday-pay setting |
 | `/api/salary-payments` | POST | Admin credit / undo for a monthly salary |
 | `/api/salary-slip?month=YYYY-MM&employeeId=ID` | GET | Download a credited PDF salary slip |
+| `/api/work/check-in`, `/api/work/check-out`, `/api/work/me` | POST, GET | Employee work sessions and own monthly hours |
+| `/api/work/live`, `/api/work/report`, `/api/work/sessions/:id` | GET, PATCH | Admin live status, reports, and session corrections |
 | `/api/expenses?month=YYYY-MM[&category=Meals&paidBy=ID]` | GET, POST | Filtered expense ledger / add expense |
 | `/api/balances` | GET | All-time balances and suggested payments |
 | `/api/settlements` | GET, POST | Settlement ledger / record repayment |

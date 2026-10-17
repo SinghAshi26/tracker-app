@@ -5,7 +5,7 @@ import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { NextRequest } from 'next/server.js';
-import { Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt, SalaryPayment } from '../../models/index.js';
+import { Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt, SalaryPayment, WorkSession } from '../../models/index.js';
 import { signToken, COOKIE_NAME } from '../../lib/token.js';
 import { middleware } from '../../middleware.js';
 import * as login from '../../app/api/auth/login/route.js';
@@ -21,8 +21,15 @@ import * as settlements from '../../app/api/settlements/route.js';
 import * as salaryPayments from '../../app/api/salary-payments/route.js';
 import * as salarySlip from '../../app/api/salary-slip/route.js';
 import * as settings from '../../app/api/organization/settings/route.js';
+import * as workCheckIn from '../../app/api/work/check-in/route.js';
+import * as workCheckOut from '../../app/api/work/check-out/route.js';
+import * as workMe from '../../app/api/work/me/route.js';
+import * as workLive from '../../app/api/work/live/route.js';
+import * as workReport from '../../app/api/work/report/route.js';
+import * as workSession from '../../app/api/work/sessions/[id]/route.js';
 import { migratePayrollDefaults } from '../../scripts/migrate-payroll.js';
 import { date, monthRange } from '../../lib/validation.js';
+import { istDate, istMonth } from '../../lib/work-hours.js';
 
 let mongo, orgA, orgB, admin, partner, employeeUser, employeeA, employeeB, adminB;
 const tokens = {};
@@ -30,7 +37,7 @@ before(async () => {
   mongo = await MongoMemoryServer.create();
   process.env.MONGODB_URI = mongo.getUri(); process.env.JWT_SECRET = 'test-only-secret-at-least-32-bytes-long';
   await mongoose.connect(process.env.MONGODB_URI);
-  await Promise.all([Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt, SalaryPayment].map(m => m.init()));
+  await Promise.all([Organization, User, Employee, Attendance, Advance, Expense, Settlement, LoginAttempt, SalaryPayment, WorkSession].map(m => m.init()));
   [orgA, orgB] = await Organization.create([{ name: 'A' }, { name: 'B' }]);
   [employeeA, employeeB] = await Employee.create([{ organizationId: orgA._id, name: 'Employee A', phone: '', monthlySalary: 30000, perDayRate: 1000, joiningDate: '2026-01-01' }, { organizationId: orgB._id, name: 'Employee B', phone: '', monthlySalary: 60000, perDayRate: 2000, joiningDate: '2026-01-01' }]);
   const passwordHash = await bcrypt.hash('testing-password-123', 4);
@@ -58,6 +65,8 @@ test('login requires correct tenant and sets an httpOnly SameSite cookie', async
 test('unauthenticated route requests and middleware are rejected', async () => {
   assert.equal((await expenses.GET(request('/api/expenses?month=2026-10'))).status, 401);
   assert.equal((await middleware(request('/api/expenses?month=2026-10'))).status, 401);
+  assert.equal((await workCheckIn.POST(request('/api/work/check-in', null, 'POST', {}))).status, 401);
+  assert.equal((await middleware(request('/api/work/check-in', null, 'POST', {}))).status, 401);
 });
 test('employee is denied expenses both in route and middleware, including crafted POST', async () => {
   for (const [module, path] of [[expenses, '/api/expenses'], [balances, '/api/balances'], [settlements, '/api/settlements'], [users, '/api/users']]) {
@@ -183,6 +192,62 @@ test('migration is idempotent and preserves explicit settings, rebates and other
   assert.equal(record.rebate, false); assert.equal(record.rebateNote, '');
   assert.equal((await Organization.findOne({ _id: orgA._id }).lean()).sundayPaid, false);
   assert.equal((await Attendance.findOne({ organizationId: orgA._id, employeeId: employeeA._id, date: '2026-10-01' }).lean()).rebate, true);
+});
+
+test('work check-in/out, reporting, auto-close, corrections, and role boundaries', async () => {
+  const originalEmployee = await Employee.findOne({ _id: employeeA._id, organizationId: orgA._id }).lean();
+  const month = istMonth(), today = istDate();
+  await Employee.updateOne({ _id: employeeA._id, organizationId: orgA._id }, { $set: { active: true, joiningDate: `${month}-01` } });
+  try {
+    const checkIn = await workCheckIn.POST(request('/api/work/check-in', employeeUser, 'POST', {}));
+    assert.equal(checkIn.status, 201);
+    const open = (await checkIn.json()).session;
+    assert.equal(open.status, 'open'); assert.equal(open.date, today);
+    assert.equal((await workCheckIn.POST(request('/api/work/check-in', employeeUser, 'POST', {}))).status, 409);
+    assert.equal((await workCheckOut.POST(request('/api/work/check-out', employeeUser, 'POST', {}))).status, 429);
+
+    await WorkSession.updateOne({ _id: open._id, organizationId: orgA._id }, { $set: { checkInAt: new Date(Date.now() - 11 * 60000) } });
+    const checkOut = await workCheckOut.POST(request('/api/work/check-out', employeeUser, 'POST', {}));
+    assert.equal(checkOut.status, 200);
+    const closed = (await checkOut.json()).session;
+    assert.equal(closed.status, 'closed'); assert.ok(closed.durationMinutes >= 10 && closed.durationMinutes <= 11);
+    assert.equal((await workCheckOut.POST(request('/api/work/check-out', employeeUser, 'POST', {}))).status, 409);
+
+    const own = await workMe.GET(request(`/api/work/me?month=${month}`, employeeUser));
+    assert.equal(own.status, 200);
+    const ownData = await own.json(); assert.equal(ownData.todaySessions.length, 1); assert.ok(ownData.todayTotalMinutes >= 10);
+    assert.equal((await workMe.GET(request(`/api/work/me?month=${month}&employeeId=${employeeB._id}`, employeeUser))).status, 403);
+
+    const dashboard = await workLive.GET(request('/api/work/live', admin));
+    assert.equal(dashboard.status, 200);
+    const dayReport = await workReport.GET(request(`/api/work/report?date=${today}`, admin));
+    assert.equal(dayReport.status, 200);
+    const monthly = await workReport.GET(request(`/api/work/report?month=${month}&employeeId=${employeeA._id}`, admin));
+    assert.equal(monthly.status, 200);
+    assert.ok((await monthly.json()).employees[0].totalMinutes >= 10);
+    assert.equal((await workReport.GET(request(`/api/work/report?month=${month}&format=csv`, admin))).headers.get('content-type'), 'text/csv; charset=utf-8');
+
+    const staleIn = new Date(Date.now() - 15 * 3600000);
+    const stale = await WorkSession.create({ organizationId: orgA._id, employeeId: employeeA._id, date: istDate(staleIn), checkInAt: staleIn, checkOutAt: null, status: 'open' });
+    await workLive.GET(request('/api/work/live', admin));
+    const autoClosed = await WorkSession.findOne({ _id: stale._id, organizationId: orgA._id }).lean();
+    assert.equal(autoClosed.status, 'auto_closed'); assert.equal(autoClosed.durationMinutes, 14 * 60);
+    const fixOut = new Date(Date.now() - 60 * 60000);
+    const fixed = await workSession.PATCH(request(`/api/work/sessions/${stale._id}`, admin, 'PATCH', { checkInAt: staleIn.toISOString(), checkOutAt: fixOut.toISOString(), editNote: 'Confirmed with employee' }));
+    assert.equal(fixed.status, 200);
+    const corrected = (await fixed.json()).session;
+    assert.equal(corrected.status, 'closed'); assert.equal(corrected.editedBy, String(admin._id)); assert.equal(corrected.editNote, 'Confirmed with employee');
+
+    for (const user of [partner, adminB]) {
+      assert.equal((await workCheckIn.POST(request('/api/work/check-in', user, 'POST', {}))).status, 403);
+      assert.equal((await workLive.GET(request('/api/work/live', user))).status, 403);
+      assert.equal((await middleware(request('/api/work/live', user))).status, 403);
+    }
+    assert.equal((await workLive.GET(request('/api/work/live', employeeUser))).status, 403);
+  } finally {
+    await WorkSession.deleteMany({ organizationId: orgA._id, employeeId: employeeA._id });
+    await Employee.updateOne({ _id: employeeA._id, organizationId: orgA._id }, { $set: { active: originalEmployee.active, joiningDate: originalEmployee.joiningDate } });
+  }
 });
 
 test('employee history rejects pre-joining months and future months at the API', async () => {

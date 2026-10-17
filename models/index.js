@@ -35,6 +35,16 @@ const attendanceSchema = new Schema({
 attendanceSchema.index({ employeeId: 1, date: 1 }, { unique: true });
 attendanceSchema.index({ organizationId: 1, date: 1 });
 export const Attendance = model('Attendance', attendanceSchema);
+const workSessionSchema = new Schema({
+  ...tenant, employeeId: ref('Employee'), date: { type: String, required: true },
+  checkInAt: { type: Date, required: true }, checkOutAt: { type: Date, default: null },
+  durationMinutes: { type: Number, default: 0, min: 0 },
+  status: { type: String, enum: ['open', 'closed', 'auto_closed'], required: true, default: 'open' },
+  editedBy: ref('User', false), editNote: { type: String, default: '' }
+}, { timestamps: { createdAt: true, updatedAt: false }, versionKey: false });
+workSessionSchema.index({ organizationId: 1, employeeId: 1, date: 1 });
+workSessionSchema.index({ organizationId: 1, employeeId: 1 }, { unique: true, partialFilterExpression: { status: 'open', checkOutAt: null } });
+export const WorkSession = model('WorkSession', workSessionSchema);
 export const Advance = model('Advance', new Schema({
   ...tenant, employeeId: ref('Employee'), amount: { type: Number, required: true, min: 0.01 },
   date: { type: String, required: true }, note: { type: String, default: '' }
